@@ -1,0 +1,165 @@
+const express = require('express');
+const mongoose = require('mongoose');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
+const fs = require('fs');
+const path = require('path');
+require('dotenv').config();
+
+const authRoutes = require('./routes/auth');
+const farmRoutes = require('./routes/farms');
+const cropRoutes = require('./routes/crops');
+const diseaseRoutes = require('./routes/disease');
+const weatherRoutes = require('./routes/weather');
+const marketplaceRoutes = require('./routes/marketplace');
+const carbonRoutes = require('./routes/carbon');
+const chatbotRoutes = require('./routes/chatbot');
+const contactRoutes = require('./routes/contact');
+
+const app = express();
+
+// DEBUG: Log all requests in production to find the missing login body
+app.use((req, res, next) => {
+  res.setHeader('X-Debug-Backend', 'Active');
+  if (req.path.startsWith('/api')) {
+    console.log(`[DEBUG_API] ${req.method} ${req.path} - Origin: ${req.get('origin')}`);
+  }
+  next();
+});
+
+// Ensure uploads directory exists
+const uploadDir = process.env.UPLOAD_PATH || 'uploads/';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+  console.log('Created uploads directory');
+}
+
+// Serve static files from uploads directory - use absolute path
+const absoluteUploadPath = path.resolve(__dirname, uploadDir);
+console.log(`[SERVE] Serving uploads from: ${absoluteUploadPath}`);
+app.use('/uploads', express.static(absoluteUploadPath, {
+  setHeaders: (res) => {
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  }
+}));
+
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+      "img-src": ["'self'", "data:", "blob:", "https:"],
+      "script-src": ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
+      "connect-src": ["'self'", "https:", "http://localhost:5000", "http://127.0.0.1:5000"],
+      "frame-src": ["'self'", "https://www.google.com"]
+    },
+  },
+  crossOriginEmbedderPolicy: false
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.'
+});
+app.use(limiter);
+
+// CORS configuration
+// CORS configuration - Allow production origin and localhost
+const allowedOrigins = [
+  process.env.FRONTEND_URL,
+  'https://swasth-khet-2-0.onrender.com',
+  'https://swasth-khet-2-0-1.onrender.com',
+  'http://localhost:5000',
+  'http://127.0.0.1:5000',
+  'http://localhost:3000',
+  'http://localhost:8080',
+  'http://localhost:5173'
+].filter(Boolean);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV === 'production') {
+      return callback(null, true);
+    }
+    return callback(new Error('The CORS policy for this site does not allow access from the specified Origin.'), false);
+  },
+  credentials: true
+}));
+
+// Logging
+app.use(morgan('combined'));
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Database connection
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/swasth-khet')
+  .then(() => console.log('MongoDB connected successfully'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
+// Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/farms', farmRoutes);
+app.use('/api/crops', cropRoutes);
+app.use('/api/disease', diseaseRoutes);
+app.use('/api/weather', weatherRoutes);
+app.use('/api/marketplace', marketplaceRoutes);
+app.use('/api/carbon', carbonRoutes);
+app.use('/api/chatbot', chatbotRoutes);
+app.use('/api/contact', contactRoutes);
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', message: 'Swasth Khet API is running' });
+});
+
+// Serve static files (Optional - only if you want to keep it as backup)
+if (process.env.SERVE_FRONTEND === 'true') {
+  const staticPath = path.resolve(__dirname, '../frontend/dist');
+  if (fs.existsSync(staticPath)) {
+    app.use(express.static(staticPath));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      res.sendFile(path.join(staticPath, 'index.html'));
+    });
+  }
+}
+
+app.get('/', (req, res) => {
+  res.json({ success: true, message: "Welcome to Swasth Khet API v2 (Decoupled)" });
+});
+
+// Global 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route not found',
+    path: req.originalUrl,
+    mode: process.env.NODE_ENV
+  });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({
+    success: false,
+    message: 'Something went wrong!',
+    error: process.env.NODE_ENV === 'development' ? err.message : {}
+  });
+});
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+module.exports = app;
+
